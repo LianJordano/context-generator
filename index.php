@@ -1,8 +1,8 @@
 <?php
-// UNIFICADOR ULTRA PRO v4.5 - PROJECT STRUCTURE EDITION
-// Features: UI Pro, Dark Mode, Anti-Freeze Streaming, Árbol de Directorios ASCII.
+// UNIFICADOR ULTRA PRO v5.0 - AI CONTEXT EDITION
+// Features: UI Pro, Dark Mode, Árbol ASCII, Estimación Tokens, Limpieza Semántica, Prompt Injection.
 
-// Configuración de Buffer para evitar bloqueos
+// Configuración de Buffer para streaming fluido
 @ini_set('zlib.output_compression', 0);
 @ini_set('implicit_flush', 1);
 @ob_end_clean(); 
@@ -13,16 +13,16 @@ date_default_timezone_set('America/Bogota');
 # -------------------------
 # CONFIGURACIÓN
 # -------------------------
-$DEFAULT_EXCLUDE_EXT = ['jpg','jpeg','png','gif','webp','svg','ico','mp4','mp3','zip','tar','gz','rar','pdf','exe','dll','class','o','pyc'];
-$DEFAULT_EXCLUDE_FOLDERS = ['vendor','node_modules','.git','.idea','.vscode','dist','build','coverage','storage','bin','obj','__pycache__'];
+$DEFAULT_EXCLUDE_EXT = ['jpg','jpeg','png','gif','webp','svg','ico','mp4','mp3','zip','tar','gz','rar','pdf','exe','dll','class','o','pyc','iso','dmg'];
+$DEFAULT_EXCLUDE_FOLDERS = ['vendor','node_modules','.git','.idea','.vscode','dist','build','coverage','storage','bin','obj','__pycache__','env','venv'];
+// Archivos que JAMÁS deben leerse por seguridad
+$SECURITY_BLOCKLIST = ['.env', 'id_rsa', 'id_rsa.pub', '.pem', '.key', 'wp-config.php', 'config.php', '.secret'];
 
 # -------------------------
 # FUNCIONES AUXILIARES
 # -------------------------
-// Función para generar el árbol ASCII a partir de rutas planas
 function generateAsciiTree($paths) {
     $tree = [];
-    // 1. Construir jerarquía
     foreach ($paths as $path) {
         $parts = explode('/', $path);
         $curr = &$tree;
@@ -32,17 +32,14 @@ function generateAsciiTree($paths) {
         }
     }
     
-    // 2. Renderizar recursivamente
     $render = function($items, $prefix = '') use (&$render) {
         $out = '';
         $keys = array_keys($items);
-        
-        // Ordenar: Carpetas primero, luego archivos
         usort($keys, function($a, $b) use ($items) {
             $aIsContent = !empty($items[$a]);
             $bIsContent = !empty($items[$b]);
             if ($aIsContent === $bIsContent) return strnatcasecmp($a, $b);
-            return $aIsContent ? -1 : 1; // Carpetas arriba
+            return $aIsContent ? -1 : 1; 
         });
 
         $lastIdx = count($keys) - 1;
@@ -50,7 +47,6 @@ function generateAsciiTree($paths) {
             $isLast = ($i === $lastIdx);
             $connector = $isLast ? '└── ' : '├── ';
             $out .= $prefix . $connector . $name . "\n";
-            
             $children = $items[$name];
             if (!empty($children)) {
                 $childPrefix = $prefix . ($isLast ? '    ' : '│   ');
@@ -59,8 +55,29 @@ function generateAsciiTree($paths) {
         }
         return $out;
     };
-    
     return ".\n" . $render($tree);
+}
+
+// Limpieza básica de código para ahorrar tokens
+function cleanCode($content, $ext) {
+    // 1. PHP: Usar función nativa (elimina comentarios y espacios)
+    if ($ext === 'php') {
+        // Un hack sucio pero efectivo: php_strip_whitespace requiere archivo, simulamos con tmp o regex
+        // Como ya leímos el contenido, usamos Regex robusto para PHP
+        $content = preg_replace('!/\*.*?\*/!s', '', $content); // Block comments
+        $content = preg_replace('/\n\s*\n/', "\n", $content);   // Empty lines
+        return trim($content);
+    }
+    
+    // 2. JS, CSS, JAVA, C, ETC: Eliminar bloques y reducir líneas vacías
+    if (in_array($ext, ['js', 'css', 'ts', 'tsx', 'jsx', 'java', 'c', 'cpp', 'h', 'cs', 'go', 'rs'])) {
+        $content = preg_replace('!/\*.*?\*/!s', '', $content); // /* ... */
+        $content = preg_replace('/\n\s*\n/', "\n", $content);   // Líneas vacías múltiples
+        // No eliminamos // para evitar romper URLs (http://) o regex literales
+        return trim($content);
+    }
+    
+    return $content;
 }
 
 # -------------------------
@@ -98,9 +115,9 @@ if ($action === 'list') {
 if ($action === 'download') {
     $token = preg_replace('/[^a-z0-9_-]/i', '', $_GET['token'] ?? '');
     $file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "unified_{$token}.txt";
-    if (!$token || !file_exists($file)) die("Archivo expirado.");
+    if (!$token || !file_exists($file)) die("Archivo expirado o no encontrado.");
     header('Content-Type: text/plain');
-    header('Content-Disposition: attachment; filename="proyecto_unificado.txt"');
+    header('Content-Disposition: attachment; filename="contexto_proyecto.txt"');
     header('Content-Length: ' . filesize($file));
     readfile($file); exit;
 }
@@ -123,6 +140,9 @@ if ($action === 'process') {
     $selPaths = $_GET['paths'] ?? [];
     $ex_ext = explode(',', $_GET['exclude_ext'] ?? '');
     $ex_folders = explode(',', $_GET['exclude_folders'] ?? '');
+    $cleanMode = isset($_GET['clean_mode']) && $_GET['clean_mode'] === '1';
+    $aiContext = isset($_GET['ai_context']) && $_GET['ai_context'] === '1';
+    
     $token = preg_replace('/[^a-z0-9_-]/i', '', $_GET['token'] ?? bin2hex(random_bytes(6)));
     
     $tmp = sys_get_temp_dir();
@@ -133,7 +153,7 @@ if ($action === 'process') {
     function sse($evt, $data) { 
         echo "event: $evt\n";
         echo "data: " . json_encode($data) . "\n\n";
-        echo str_repeat(' ', 4096); echo "\n"; // Padding Anti-Freeze
+        echo str_repeat(' ', 4096); echo "\n"; 
         @ob_flush(); @flush(); 
     }
 
@@ -141,13 +161,21 @@ if ($action === 'process') {
 
     // 1. Indexado
     $files = [];
-    $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS));
+    try {
+        $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS));
+    } catch (Exception $e) {
+        sse('done', ['error' => 'Ruta no legible.']); exit;
+    }
     
     foreach ($iterator as $file) {
         if (file_exists($cancelFlag)) { sse('cancelled', []); exit; }
         $rel = str_replace('\\', '/', ltrim(substr($file->getPathname(), strlen($base)), '/\\'));
+        $filename = $file->getFilename();
         
-        // Filtros
+        // Security Blocklist Check
+        if (in_array($filename, $SECURITY_BLOCKLIST)) continue;
+
+        // Filtros Selección
         if (!empty($selPaths)) {
             $included = false;
             foreach ($selPaths as $sel) {
@@ -156,6 +184,8 @@ if ($action === 'process') {
             }
             if (!$included) continue;
         }
+        
+        // Filtros Exclusión
         $parts = explode('/', $rel);
         foreach ($parts as $p) if (in_array($p, $ex_folders)) continue 2;
         if (in_array(strtolower($file->getExtension()), $ex_ext)) continue;
@@ -169,20 +199,32 @@ if ($action === 'process') {
     if ($total > 0) {
         $fh = fopen($outFile, 'w');
         
-        // --- NUEVO: Escribir Estructura del Proyecto (Árbol) ---
-        fwrite($fh, "# REPORTE DE UNIFICACIÓN\n");
-        fwrite($fh, "# FECHA: " . date('Y-m-d H:i:s') . "\n");
-        fwrite($fh, "# ARCHIVOS TOTALES: $total\n\n");
+        // --- PROMPT DE CONTEXTO ---
+        if ($aiContext) {
+            $date = date('Y-m-d H:i:s');
+            $header = <<<EOT
+# CONTEXTO DEL SISTEMA PARA LA IA
+# ===============================
+# Este archivo contiene el código fuente completo de un proyecto.
+# Fecha de generación: $date
+# Total de archivos: $total
+#
+# INSTRUCCIONES:
+# 1. Analiza la estructura de directorios a continuación para entender la arquitectura.
+# 2. Usa este código como única fuente de verdad.
+# 3. Al sugerir cambios, mantén el estilo de código existente.
+#
+# ESTRUCTURA DE DIRECTORIOS:
+# ==========================
+EOT;
+            fwrite($fh, $header . "\n");
+        } else {
+            fwrite($fh, "# REPORTE DE UNIFICACIÓN\n# ARCHIVOS: $total\n\n");
+        }
         
-        fwrite($fh, str_repeat("=", 50) . "\n");
-        fwrite($fh, " ESTRUCTURA DEL PROYECTO \n");
-        fwrite($fh, str_repeat("=", 50) . "\n");
-        
-        // Generar árbol y escribirlo
-        $asciiTree = generateAsciiTree($files);
-        fwrite($fh, $asciiTree);
+        // Árbol ASCII
+        fwrite($fh, generateAsciiTree($files));
         fwrite($fh, "\n" . str_repeat("=", 50) . "\n\n");
-        // -----------------------------------------------------
 
         $i = 0;
         foreach ($files as $f) {
@@ -194,11 +236,18 @@ if ($action === 'process') {
             fwrite($fh, "====== INICIO ARCHIVO: $f ======\n");
             try {
                 $c = file_get_contents($base . DIRECTORY_SEPARATOR . $f);
+                
+                // --- LIMPIEZA DE CÓDIGO (TOKEN SAVER) ---
+                if ($cleanMode) {
+                    $ext = pathinfo($f, PATHINFO_EXTENSION);
+                    $c = cleanCode($c, $ext);
+                }
+                
                 fwrite($fh, $c . "\n");
-            } catch(Exception $e) { fwrite($fh, "[ERROR LECTURA]\n"); }
+            } catch(Exception $e) { fwrite($fh, "[ERROR DE LECTURA]\n"); }
             fwrite($fh, "====== FIN ARCHIVO: $f ======\n\n");
             
-            usleep(5000); // Pausa minúscula para UI fluida
+            if ($i % 10 === 0) usleep(1000); // Pequeña pausa cada 10 archivos para no ahogar la CPU
         }
         fclose($fh);
         sse('done', ['url' => "?action=download&token=$token"]);
@@ -213,7 +262,7 @@ if ($action === 'process') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Unificador Ultra PRO v4.5</title>
+    <title>Unificador AI Context v5.0</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Fonts & Icons -->
@@ -243,39 +292,38 @@ if ($action === 'process') {
         .dark ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
         ::-webkit-scrollbar-track { background: #f3f4f6; }
         ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
-        .tree-enter { animation: slideIn 0.2s ease-out; }
-        @keyframes slideIn { from { opacity: 0; transform: translateX(-5px); } to { opacity: 1; transform: translateX(0); } }
-        .checkbox-wrapper input:checked { background-color: #2563eb; border-color: #2563eb; background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e%3c/svg%3e"); }
+        .checkbox-wrapper input:checked { background-color: #2563eb; border-color: #2563eb; }
+        @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
     </style>
 </head>
 <body class="bg-light-50 text-slate-700 dark:bg-dark-900 dark:text-slate-300 font-sans h-screen flex flex-col overflow-hidden">
 
     <!-- HEADER -->
-    <header class="h-16 bg-white dark:bg-dark-800 border-b border-light-200 dark:border-dark-600 flex items-center justify-between px-6 shadow-sm z-20 transition-colors">
+    <header class="h-14 bg-white dark:bg-dark-800 border-b border-light-200 dark:border-dark-600 flex items-center justify-between px-6 shadow-sm z-20">
         <div class="flex items-center gap-3">
-            <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center shadow-md">
-                <i class="ph ph-tree-structure text-white text-xl"></i>
+            <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-md">
+                <i class="ph ph-robot text-white text-lg"></i>
             </div>
             <div>
-                <h1 class="font-bold text-slate-800 dark:text-white leading-tight">Unificador <span class="text-accent-500">v4.5</span></h1>
-                <p class="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">Structure Aware</p>
+                <h1 class="font-bold text-slate-800 dark:text-white text-sm leading-tight">Unificador <span class="text-indigo-500">AI Context</span></h1>
+                <p class="text-[9px] text-slate-500 uppercase tracking-widest font-semibold">v5.0 &bull; Prompt Engineering Tool</p>
             </div>
         </div>
-        <button onclick="toggleTheme()" class="w-10 h-10 rounded-full bg-light-100 dark:bg-dark-700 hover:bg-light-200 dark:hover:bg-dark-600 flex items-center justify-center transition-all text-slate-600 dark:text-yellow-400">
-            <i id="themeIcon" class="ph-fill ph-sun text-xl"></i>
+        <button onclick="toggleTheme()" class="w-8 h-8 rounded-full hover:bg-light-200 dark:hover:bg-dark-600 flex items-center justify-center transition-all text-slate-600 dark:text-yellow-400">
+            <i id="themeIcon" class="ph-fill ph-sun text-lg"></i>
         </button>
     </header>
 
     <main class="flex-1 flex overflow-hidden">
         
         <!-- SIDEBAR -->
-        <aside class="w-96 bg-white dark:bg-dark-800 border-r border-light-200 dark:border-dark-600 flex flex-col shadow-xl z-10 transition-colors">
-            <div class="p-5 border-b border-light-200 dark:border-dark-600">
-                <label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 block">Directorio Raíz</label>
+        <aside class="w-80 bg-white dark:bg-dark-800 border-r border-light-200 dark:border-dark-600 flex flex-col shadow-xl z-10">
+            <div class="p-4 border-b border-light-200 dark:border-dark-600">
+                <label class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1 block">Ruta del Proyecto</label>
                 <div class="relative group">
                     <input type="text" id="basePath" value="<?php echo htmlspecialchars(str_replace('\\', '/', __DIR__)); ?>" 
-                           class="w-full pl-3 pr-10 bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-sm rounded-md py-2 focus:ring-2 focus:ring-accent-500 outline-none transition-all text-slate-700 dark:text-slate-200">
-                    <button onclick="initTree()" class="absolute right-2 top-1.5 p-1 text-slate-400 hover:text-accent-500" title="Recargar"><i class="ph ph-arrows-clockwise text-lg"></i></button>
+                           class="w-full pl-2 pr-8 bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-xs rounded py-1.5 focus:border-indigo-500 outline-none transition-all text-slate-700 dark:text-slate-200 font-mono">
+                    <button onclick="initTree()" class="absolute right-1 top-1 p-1 text-slate-400 hover:text-indigo-500" title="Recargar"><i class="ph ph-arrows-clockwise text-base"></i></button>
                 </div>
             </div>
 
@@ -284,16 +332,34 @@ if ($action === 'process') {
             </div>
 
             <div class="p-4 border-t border-light-200 dark:border-dark-600 bg-white dark:bg-dark-800 space-y-3">
-                <div class="flex justify-between text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
-                    <button onclick="checkAll(true)" class="hover:text-accent-500">Marcar todo</button>
-                    <button onclick="checkAll(false)" class="hover:text-red-400">Limpiar</button>
+                
+                <!-- PRO OPTIONS -->
+                <div class="space-y-2 pb-2 border-b border-light-200 dark:border-dark-600">
+                    <label class="flex items-center gap-2 cursor-pointer group">
+                        <input type="checkbox" id="chkAiContext" checked class="rounded border-slate-300 text-indigo-600 focus:ring-0">
+                        <span class="text-xs text-slate-600 dark:text-slate-300 group-hover:text-indigo-400 transition-colors">Añadir Prompt de Contexto IA</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer group">
+                        <input type="checkbox" id="chkClean" class="rounded border-slate-300 text-indigo-600 focus:ring-0">
+                        <div class="flex flex-col">
+                            <span class="text-xs text-slate-600 dark:text-slate-300 group-hover:text-indigo-400 transition-colors">Token Saver (Minificar)</span>
+                            <span class="text-[9px] text-slate-400">Elimina comentarios y espacios extra</span>
+                        </div>
+                    </label>
                 </div>
-                <div class="grid grid-cols-2 gap-3">
-                    <input type="text" id="exFolders" value="<?php echo implode(',', $DEFAULT_EXCLUDE_FOLDERS); ?>" class="bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-xs rounded px-2 py-1.5 outline-none text-slate-600 dark:text-slate-400 placeholder-slate-400" placeholder="Excluir carpetas">
-                    <input type="text" id="exExt" value="<?php echo implode(',', $DEFAULT_EXCLUDE_EXT); ?>" class="bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-xs rounded px-2 py-1.5 outline-none text-slate-600 dark:text-slate-400 placeholder-slate-400" placeholder="Excluir ext">
+
+                <div class="grid grid-cols-2 gap-2">
+                    <input type="text" id="exFolders" value="<?php echo implode(',', $DEFAULT_EXCLUDE_FOLDERS); ?>" class="bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-[10px] rounded px-2 py-1 outline-none text-slate-600 dark:text-slate-400 placeholder-slate-400" placeholder="Excluir carpetas">
+                    <input type="text" id="exExt" value="<?php echo implode(',', $DEFAULT_EXCLUDE_EXT); ?>" class="bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-[10px] rounded px-2 py-1 outline-none text-slate-600 dark:text-slate-400 placeholder-slate-400" placeholder="Excluir ext">
                 </div>
-                <button id="btnGo" class="w-full bg-accent-600 hover:bg-accent-500 text-white font-semibold py-3 rounded-md shadow-lg shadow-accent-500/30 transition-all active:scale-[0.98] flex items-center justify-center gap-2 group">
-                    <i class="ph ph-lightning text-xl group-hover:text-yellow-300"></i><span>Unificar Archivos</span>
+                
+                <div class="flex justify-between text-[10px] font-medium text-slate-400">
+                    <button onclick="checkAll(true)" class="hover:text-indigo-500">Todo</button>
+                    <button onclick="checkAll(false)" class="hover:text-red-400">Nada</button>
+                </div>
+
+                <button id="btnGo" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-2.5 rounded-md shadow-lg shadow-indigo-500/20 transition-all active:scale-[0.98] flex items-center justify-center gap-2 group text-sm">
+                    <i class="ph ph-lightning text-lg group-hover:text-yellow-300"></i><span>Procesar Proyecto</span>
                 </button>
             </div>
         </aside>
@@ -302,38 +368,56 @@ if ($action === 'process') {
         <section class="flex-1 flex flex-col bg-light-100 dark:bg-dark-900 relative transition-colors">
             
             <!-- PROGRESS BAR -->
-            <div id="progressContainer" class="hidden w-full bg-light-200 dark:bg-dark-700 h-1.5 relative z-30">
-                <div id="progressBar" class="h-full bg-accent-500 w-0 transition-all duration-150 ease-out shadow-[0_0_15px_#2563eb]"></div>
+            <div id="progressContainer" class="hidden w-full bg-light-200 dark:bg-dark-700 h-1 relative z-30">
+                <div id="progressBar" class="h-full bg-indigo-500 w-0 transition-all duration-150 ease-out shadow-[0_0_10px_#6366f1]"></div>
             </div>
 
             <!-- EMPTY STATE -->
             <div id="emptyState" class="absolute inset-0 flex flex-col items-center justify-center opacity-40 pointer-events-none transition-opacity">
-                <i class="ph ph-files text-6xl mb-4 text-slate-400"></i>
-                <h3 class="text-xl font-medium text-slate-600 dark:text-slate-400">Selecciona archivos</h3>
+                <i class="ph ph-code text-6xl mb-4 text-slate-400"></i>
+                <h3 class="text-lg font-medium text-slate-600 dark:text-slate-400">Listo para ingerir código</h3>
             </div>
 
             <!-- CONSOLE -->
-            <div id="consoleContainer" class="flex-1 p-8 overflow-y-auto hidden">
-                <div class="max-w-4xl mx-auto w-full bg-white dark:bg-[#0f1115] rounded-xl border border-light-300 dark:border-dark-600 shadow-xl overflow-hidden flex flex-col h-full">
-                    <div class="bg-light-50 dark:bg-dark-800 px-4 py-2 border-b border-light-200 dark:border-dark-600 flex justify-between items-center">
-                        <span class="text-xs font-mono text-slate-400">System Log</span>
+            <div id="consoleContainer" class="flex-1 p-6 overflow-y-auto hidden">
+                <div class="max-w-3xl mx-auto w-full bg-white dark:bg-[#0f1115] rounded-xl border border-light-300 dark:border-dark-600 shadow-xl overflow-hidden flex flex-col h-full">
+                    <div class="bg-light-50 dark:bg-dark-800 px-3 py-2 border-b border-light-200 dark:border-dark-600 flex justify-between items-center">
+                        <span class="text-[10px] font-mono text-slate-400 uppercase tracking-widest"><i class="ph-fill ph-terminal-window mr-1"></i> System Log</span>
                         <button id="btnCancel" class="hidden text-[10px] uppercase font-bold text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 px-2 py-1 rounded">Cancelar</button>
                     </div>
-                    <div id="logs" class="flex-1 p-4 font-mono text-xs space-y-1 overflow-y-auto bg-white dark:bg-[#0f1115] text-slate-600 dark:text-slate-300"></div>
+                    <div id="logs" class="flex-1 p-4 font-mono text-[11px] space-y-1 overflow-y-auto bg-white dark:bg-[#0f1115] text-slate-600 dark:text-slate-300 leading-relaxed"></div>
                 </div>
             </div>
 
-            <!-- SUCCESS PANEL -->
-            <div id="successPanel" class="hidden absolute bottom-10 right-10 z-40 animate-[slideIn_0.4s_ease-out]">
-                <div class="bg-white dark:bg-dark-700 border border-green-200 dark:border-green-900 p-5 rounded-lg shadow-2xl w-80 flex flex-col gap-3">
-                    <div class="flex items-center gap-3">
-                        <i class="ph-fill ph-check-circle text-2xl text-green-500"></i>
-                        <div>
-                            <h4 class="font-bold text-slate-800 dark:text-white text-sm">¡Completado!</h4>
-                            <p class="text-xs text-slate-500">Archivo generado con estructura.</p>
+            <!-- SUCCESS PANEL (PRO) -->
+            <div id="successPanel" class="hidden absolute bottom-8 right-8 z-50 animate-[slideUp_0.4s_cubic-bezier(0.16,1,0.3,1)]">
+                <div class="bg-white dark:bg-dark-700 border border-indigo-100 dark:border-dark-500 p-0 rounded-lg shadow-2xl w-80 overflow-hidden ring-1 ring-black/5">
+                    <div class="bg-green-500 p-3 flex items-center justify-between">
+                        <div class="flex items-center gap-2 text-white">
+                            <i class="ph-bold ph-check-circle text-lg"></i>
+                            <span class="font-bold text-sm">Completado</span>
                         </div>
+                        <button onclick="el('successPanel').classList.add('hidden')" class="text-white/80 hover:text-white"><i class="ph-bold ph-x"></i></button>
                     </div>
-                    <a id="btnDownload" href="#" class="w-full text-center bg-green-600 hover:bg-green-500 text-white text-sm font-medium py-2 rounded-md transition-colors shadow-md">Descargar .txt</a>
+                    
+                    <div class="p-4 space-y-3">
+                        <div class="flex justify-between items-end border-b border-light-200 dark:border-dark-600 pb-3">
+                            <div>
+                                <p class="text-[10px] text-slate-400 uppercase">Peso Aprox.</p>
+                                <p id="statSize" class="text-sm font-bold text-slate-700 dark:text-white">0 MB</p>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-[10px] text-slate-400 uppercase">Tokens Estimados</p>
+                                <p id="statTokens" class="text-sm font-bold text-indigo-500 font-mono">0k</p>
+                            </div>
+                        </div>
+
+                        <button id="btnCopy" onclick="copyToClipboard()" class="w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold py-2.5 rounded transition-all active:scale-95">
+                            <i class="ph-bold ph-copy"></i> Copiar al Portapapeles
+                        </button>
+                        
+                        <a id="btnDownload" href="#" class="block w-full text-center text-xs text-indigo-500 hover:underline">Descargar archivo .txt</a>
+                    </div>
                 </div>
             </div>
         </section>
@@ -343,7 +427,7 @@ if ($action === 'process') {
         const el = id => document.getElementById(id);
         const state = { base: '', source: null };
 
-        // THEME
+        // THEME INIT
         function initTheme() {
             if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
                 document.documentElement.classList.add('dark'); updateThemeIcon(true);
@@ -355,8 +439,7 @@ if ($action === 'process') {
             updateThemeIcon(isDark);
         }
         function updateThemeIcon(isDark) {
-            const icon = el('themeIcon');
-            icon.className = isDark ? 'ph-fill ph-sun text-xl text-yellow-400' : 'ph-fill ph-moon text-xl text-slate-600';
+            el('themeIcon').className = isDark ? 'ph-fill ph-sun text-lg text-yellow-400' : 'ph-fill ph-moon text-lg text-slate-600';
         }
         initTheme();
 
@@ -365,13 +448,14 @@ if ($action === 'process') {
             const map = {
                 'php': 'devicon-php-plain colored', 'js': 'devicon-javascript-plain colored', 'html': 'devicon-html5-plain colored',
                 'css': 'devicon-css3-plain colored', 'py': 'devicon-python-plain colored', 'java': 'devicon-java-plain colored',
-                'json': 'devicon-json-plain colored', 'sql': 'devicon-mysql-plain colored', 'ts': 'devicon-typescript-plain colored'
+                'json': 'devicon-json-plain colored', 'sql': 'devicon-mysql-plain colored', 'ts': 'devicon-typescript-plain colored',
+                'md': 'devicon-markdown-original dark:text-white', 'gitignore': 'devicon-git-plain colored'
             };
             if(name === 'package.json') return 'devicon-npm-original-wordmark colored';
             return map[ext] || 'ph ph-file-text text-slate-400';
         }
 
-        // TREE VIEW LOGIC
+        // TREE LOGIC
         function initTree() {
             state.base = el('basePath').value.trim();
             if(!state.base) return alert('Define una ruta');
@@ -386,27 +470,33 @@ if ($action === 'process') {
                 const data = await res.json();
                 container.innerHTML = '';
                 if(data.error) throw new Error(data.error);
-                if(!data.items || !data.items.length) { container.innerHTML = `<div class="pl-6 py-1 text-slate-400 text-[10px]">Vacío</div>`; return; }
+                if(!data.items || !data.items.length) { container.innerHTML = `<div class="pl-6 py-1 text-slate-400 text-[10px] italic">Vacío</div>`; return; }
 
                 const ul = document.createElement('ul');
-                ul.className = isRoot ? '' : 'pl-4 border-l border-light-200 dark:border-dark-600 ml-2 mt-1';
+                ul.className = isRoot ? '' : 'pl-3 border-l border-light-200 dark:border-dark-600 ml-1.5 mt-0.5';
                 
                 data.items.forEach(item => {
                     const li = document.createElement('li');
                     const uid = btoa(item.path).replace(/=/g, '');
                     const isDir = item.type === 'dir';
-                    const icon = isDir ? '<i class="ph-fill ph-folder text-blue-400 text-lg"></i>' : `<i class="${getIconClass(item.ext, item.name)} text-lg"></i>`;
+                    // Seguridad visual: Bloqueo de archivos sensibles
+                    const isBlocked = ['.env','id_rsa','.git'].includes(item.name); 
+                    const icon = isDir ? '<i class="ph-fill ph-folder text-indigo-400 text-base"></i>' : `<i class="${getIconClass(item.ext, item.name)} text-base"></i>`;
 
                     li.innerHTML = `
-                        <div class="group flex items-center gap-2 py-1 px-2 rounded hover:bg-light-200 dark:hover:bg-dark-700 cursor-pointer select-none" data-path="${item.path}">
-                            <span class="w-4 h-4 flex items-center justify-center text-slate-400 toggle-btn text-[10px]">${isDir ? '<i class="ph-bold ph-caret-right"></i>' : ''}</span>
-                            <div class="checkbox-wrapper flex"><input type="checkbox" class="appearance-none w-4 h-4 border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-dark-900 cursor-pointer" value="${item.path}"></div>
-                            <span class="flex w-5 justify-center">${icon}</span>
-                            <span class="text-slate-600 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white truncate text-[13px]">${item.name}</span>
+                        <div class="group flex items-center gap-1.5 py-0.5 px-1 rounded hover:bg-light-200 dark:hover:bg-dark-700 cursor-pointer select-none" data-path="${item.path}">
+                            <span class="w-3 h-3 flex items-center justify-center text-slate-400 toggle-btn text-[9px] hover:text-indigo-500">${isDir ? '<i class="ph-bold ph-caret-right"></i>' : ''}</span>
+                            <div class="checkbox-wrapper flex">
+                                <input type="checkbox" ${isBlocked ? 'disabled' : ''} class="appearance-none w-3.5 h-3.5 border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-dark-900 cursor-pointer disabled:opacity-30" value="${item.path}">
+                            </div>
+                            <span class="flex w-5 justify-center opacity-90">${icon}</span>
+                            <span class="${isBlocked ? 'text-red-400 line-through decoration-2' : 'text-slate-600 dark:text-slate-300'} group-hover:text-slate-900 dark:group-hover:text-white truncate text-[11px] font-medium">${item.name}</span>
                         </div>
                         ${isDir ? `<div id="sub-${uid}" class="hidden"></div>` : ''}
                     `;
                     ul.appendChild(li);
+
+                    if(isBlocked) return; 
 
                     const row = li.querySelector('div'), chk = li.querySelector('input'), toggle = li.querySelector('.toggle-btn');
                     if(isDir) {
@@ -420,25 +510,66 @@ if ($action === 'process') {
                         row.addEventListener('dblclick', doToggle);
                     }
                     chk.addEventListener('click', e => e.stopPropagation());
-                    chk.addEventListener('change', () => { if(isDir) li.querySelector(`#sub-${uid}`)?.querySelectorAll('input').forEach(c => c.checked = chk.checked); });
+                    chk.addEventListener('change', () => { if(isDir) li.querySelector(`#sub-${uid}`)?.querySelectorAll('input:not([disabled])').forEach(c => c.checked = chk.checked); });
                     row.addEventListener('click', e => { if(e.target!==toggle) { chk.checked=!chk.checked; chk.dispatchEvent(new Event('change')); }});
                 });
                 container.appendChild(ul);
-            } catch(e) { container.innerHTML = `<div class="text-red-500 text-xs p-2">${e.message}</div>`; }
+            } catch(e) { container.innerHTML = `<div class="text-red-500 text-[10px] p-2">${e.message}</div>`; }
         }
 
-        // APP LOGIC
+        // COPY TO CLIPBOARD & STATS CALC
+        async function copyToClipboard() {
+            const btn = el('btnCopy');
+            const url = el('btnDownload').href;
+            const originalHtml = btn.innerHTML;
+            
+            try {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="ph ph-spinner animate-spin"></i> Descargando...';
+                
+                const res = await fetch(url);
+                const text = await res.text();
+                
+                // Calculo de Stats en tiempo real
+                const sizeMB = (text.length / 1024 / 1024).toFixed(2);
+                const tokens = Math.ceil(text.length / 4); // Aprox simple
+                
+                el('statSize').innerText = sizeMB + ' MB';
+                el('statTokens').innerText = (tokens/1000).toFixed(1) + 'k';
+                
+                await navigator.clipboard.writeText(text);
+                
+                btn.classList.remove('bg-slate-800', 'hover:bg-slate-700');
+                btn.classList.add('bg-green-600', 'hover:bg-green-500');
+                btn.innerHTML = '<i class="ph-bold ph-check"></i> ¡Copiado!';
+                
+                setTimeout(() => {
+                    btn.className = "w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold py-2.5 rounded transition-all active:scale-95";
+                    btn.innerHTML = originalHtml;
+                    btn.disabled = false;
+                }, 2000);
+            } catch (err) {
+                alert('Error al copiar. El archivo puede ser muy grande para el navegador.');
+                btn.innerHTML = '<i class="ph-bold ph-warning"></i> Falló';
+                btn.disabled = false;
+            }
+        }
+
+        // LOGGING
         function log(msg, type='info') {
             const d = document.createElement('div');
             const clr = { info: 'text-slate-500 dark:text-slate-400', success: 'text-green-500 font-bold', error: 'text-red-500 font-bold' };
-            d.className = `${clr[type] || clr.info} text-xs py-0.5 border-l-2 border-transparent pl-2`;
-            d.innerText = `> ${msg}`;
+            d.className = `${clr[type] || clr.info} border-l-2 border-transparent pl-2 hover:bg-light-100 dark:hover:bg-white/5 py-0.5 rounded-r`;
+            // Timestamp
+            const time = new Date().toLocaleTimeString('es-CO', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+            d.innerHTML = `<span class="opacity-50 text-[9px] mr-2">[${time}]</span> ${msg}`;
             el('logs').appendChild(d);
             el('logs').parentElement.scrollTop = el('logs').parentElement.scrollHeight;
         }
 
+        // PROCESS
         el('btnGo').onclick = () => {
-            const checks = document.querySelectorAll('input[type="checkbox"]:checked');
+            const checks = document.querySelectorAll('input[type="checkbox"][value]:checked');
             const paths = Array.from(checks).map(c => c.value);
 
             el('emptyState').classList.add('hidden');
@@ -449,24 +580,28 @@ if ($action === 'process') {
             el('progressBar').style.width = '0%';
             el('btnCancel').classList.remove('hidden');
             el('btnGo').disabled = true;
-            el('btnGo').classList.add('opacity-50');
+            el('btnGo').classList.add('opacity-50', 'cursor-not-allowed');
 
             const params = new URLSearchParams({ 
-                action: 'process', base: state.base, 
-                exclude_folders: el('exFolders').value, exclude_ext: el('exExt').value 
+                action: 'process', 
+                base: state.base, 
+                exclude_folders: el('exFolders').value, 
+                exclude_ext: el('exExt').value,
+                clean_mode: el('chkClean').checked ? '1' : '0',
+                ai_context: el('chkAiContext').checked ? '1' : '0'
             });
             paths.forEach(p => params.append('paths[]', p));
 
             if(state.source) state.source.close();
             state.source = new EventSource('?' + params.toString());
             
-            state.source.addEventListener('started', e => log('Iniciando indexado...', 'info'));
-            state.source.addEventListener('indexed', e => log(`Se encontraron ${JSON.parse(e.data).count} archivos.`, 'info'));
+            state.source.addEventListener('started', e => log('Iniciando motor de unificación...', 'info'));
+            state.source.addEventListener('indexed', e => log(`Índice generado: ${JSON.parse(e.data).count} archivos encontrados.`, 'info'));
             
             state.source.addEventListener('progress', e => {
                 const d = JSON.parse(e.data);
                 requestAnimationFrame(() => el('progressBar').style.width = d.pct + '%');
-                if(Math.random() > 0.8) log(d.file); 
+                if(Math.random() > 0.7) log(`Procesando: ${d.file}`); 
             });
 
             state.source.addEventListener('done', e => {
@@ -476,23 +611,25 @@ if ($action === 'process') {
                     el('progressBar').style.width = '100%';
                     el('btnDownload').href = d.url;
                     el('successPanel').classList.remove('hidden');
-                    log('GENERACIÓN EXITOSA (Incluye Estructura de Proyecto)', 'success');
+                    // Simular click en copy para calcular stats automágicamente (opcional, mejor que el usuario haga click)
+                    // copyToClipboard(); 
+                    log('PROCESO FINALIZADO CON ÉXITO', 'success');
                 } else log(d.error, 'error');
             });
 
-            state.source.onerror = () => { log('Error de conexión', 'error'); finish(); };
+            state.source.onerror = () => { log('Conexión perdida con el servidor.', 'error'); finish(); };
         };
 
-        el('btnCancel').onclick = () => { fetch('?action=cancel&token=1'); if(state.source) state.source.close(); log('Cancelado'); };
+        el('btnCancel').onclick = () => { fetch('?action=cancel&token=1'); if(state.source) state.source.close(); log('Cancelado por usuario.', 'error'); finish(); };
 
         function finish() {
             if(state.source) state.source.close();
             el('btnGo').disabled = false;
-            el('btnGo').classList.remove('opacity-50');
+            el('btnGo').classList.remove('opacity-50', 'cursor-not-allowed');
             setTimeout(() => el('progressContainer').classList.add('hidden'), 1000);
         }
 
-        function checkAll(v) { document.querySelectorAll('input[type="checkbox"]').forEach(c => c.checked = v); }
+        function checkAll(v) { document.querySelectorAll('input[type="checkbox"]:not([disabled])').forEach(c => c.checked = v); }
         if(el('basePath').value) initTree();
     </script>
 </body>
