@@ -1,544 +1,499 @@
 <?php
-// index.php - Unificador Ultra PRO v2.5
-// Características: UI Dark mode, SSE Streaming, Selección ARBÓREA (Subcarpetas), Exclusiones dinámicas.
-// Requisitos: PHP 7.0+, permisos de escritura en carpeta temporal.
+// UNIFICADOR ULTRA PRO v4.5 - PROJECT STRUCTURE EDITION
+// Features: UI Pro, Dark Mode, Anti-Freeze Streaming, Árbol de Directorios ASCII.
 
-ini_set('memory_limit', '4096M');
-ini_set('max_execution_time', '0');
+// Configuración de Buffer para evitar bloqueos
+@ini_set('zlib.output_compression', 0);
+@ini_set('implicit_flush', 1);
+@ob_end_clean(); 
 set_time_limit(0);
+ini_set('memory_limit', '4096M');
 date_default_timezone_set('America/Bogota');
 
 # -------------------------
-# CONFIGURACIÓN POR DEFECTO
+# CONFIGURACIÓN
 # -------------------------
-$DEFAULT_EXCLUDE_EXT = ['jpg','jpeg','png','gif','webp','svg','ico','mp4','mp3','log','zip','tar','gz','rar','pdf','exe','dll'];
-$DEFAULT_EXCLUDE_FOLDERS = ['vendor','node_modules','storage','bootstrap/cache','.git','.idea','.vscode','dist','build','coverage'];
-$DEFAULT_EXCLUDE_FILES = ['.env', '.DS_Store', 'Thumbs.db', 'composer.lock', 'package-lock.json', 'yarn.lock'];
+$DEFAULT_EXCLUDE_EXT = ['jpg','jpeg','png','gif','webp','svg','ico','mp4','mp3','zip','tar','gz','rar','pdf','exe','dll','class','o','pyc'];
+$DEFAULT_EXCLUDE_FOLDERS = ['vendor','node_modules','.git','.idea','.vscode','dist','build','coverage','storage','bin','obj','__pycache__'];
 
 # -------------------------
-# LÓGICA DEL SERVIDOR
+# FUNCIONES AUXILIARES
+# -------------------------
+// Función para generar el árbol ASCII a partir de rutas planas
+function generateAsciiTree($paths) {
+    $tree = [];
+    // 1. Construir jerarquía
+    foreach ($paths as $path) {
+        $parts = explode('/', $path);
+        $curr = &$tree;
+        foreach ($parts as $part) {
+            if (!isset($curr[$part])) $curr[$part] = [];
+            $curr = &$curr[$part];
+        }
+    }
+    
+    // 2. Renderizar recursivamente
+    $render = function($items, $prefix = '') use (&$render) {
+        $out = '';
+        $keys = array_keys($items);
+        
+        // Ordenar: Carpetas primero, luego archivos
+        usort($keys, function($a, $b) use ($items) {
+            $aIsContent = !empty($items[$a]);
+            $bIsContent = !empty($items[$b]);
+            if ($aIsContent === $bIsContent) return strnatcasecmp($a, $b);
+            return $aIsContent ? -1 : 1; // Carpetas arriba
+        });
+
+        $lastIdx = count($keys) - 1;
+        foreach ($keys as $i => $name) {
+            $isLast = ($i === $lastIdx);
+            $connector = $isLast ? '└── ' : '├── ';
+            $out .= $prefix . $connector . $name . "\n";
+            
+            $children = $items[$name];
+            if (!empty($children)) {
+                $childPrefix = $prefix . ($isLast ? '    ' : '│   ');
+                $out .= $render($children, $childPrefix);
+            }
+        }
+        return $out;
+    };
+    
+    return ".\n" . $render($tree);
+}
+
+# -------------------------
+# BACKEND
 # -------------------------
 $action = $_GET['action'] ?? '';
 
-// 1. LISTAR CONTENIDO (Soporta navegación por subcarpetas)
+// LISTAR
 if ($action === 'list') {
     $base = rtrim($_GET['base'] ?? __DIR__, '/\\');
-    // 'dir' es la subcarpeta relativa solicitada. Si está vacía, es la raíz.
     $relDir = isset($_GET['dir']) ? trim($_GET['dir'], '/\\') : '';
-    
-    // Construir ruta real a escanear
-    $scanDir = $base;
-    if ($relDir !== '') {
-        $scanDir .= DIRECTORY_SEPARATOR . $relDir;
-    }
+    $scanDir = $base . ($relDir !== '' ? DIRECTORY_SEPARATOR . $relDir : '');
 
-    // Seguridad básica: evitar salir del directorio base
-    if (strpos(realpath($scanDir), realpath($base)) !== 0 || !is_dir($scanDir) || !is_readable($scanDir)) {
-        header('Content-Type: application/json');
-        echo json_encode(['error' => 'Directorio no accesible o ruta inválida', 'path' => $scanDir]);
-        exit;
-    }
+    if (!is_dir($scanDir)) { echo json_encode(['error' => 'Ruta inválida']); exit; }
     
-    header('Content-Type: application/json');
     $items = [];
-
     try {
-        $iterator = new DirectoryIterator($scanDir);
-        foreach ($iterator as $fileinfo) {
+        foreach (new DirectoryIterator($scanDir) as $fileinfo) {
             if ($fileinfo->isDot()) continue;
-            
-            // Construir ruta relativa para el frontend (ID único)
-            $itemName = $fileinfo->getFilename();
-            $itemRelPath = $relDir ? $relDir . '/' . $itemName : $itemName;
-
             $items[] = [
-                'name' => $itemName,
-                'path' => $itemRelPath, // Ruta relativa completa usada para el checkbox
+                'name' => $fileinfo->getFilename(),
+                'path' => $relDir ? $relDir . '/' . $fileinfo->getFilename() : $fileinfo->getFilename(),
                 'type' => $fileinfo->isDir() ? 'dir' : 'file',
-                'size' => $fileinfo->isDir() ? '-' : formatBytes($fileinfo->getSize())
+                'ext'  => strtolower($fileinfo->getExtension())
             ];
         }
-        
-        // Ordenar: Carpetas primero
         usort($items, function($a, $b) {
-            if ($a['type'] === $b['type']) {
-                return strnatcasecmp($a['name'], $b['name']);
-            }
-            return $a['type'] === 'dir' ? -1 : 1;
+            return ($a['type'] === $b['type']) ? strnatcasecmp($a['name'], $b['name']) : ($a['type'] === 'dir' ? -1 : 1);
         });
-
-    } catch (Exception $e) {
-        echo json_encode(['error' => $e->getMessage()]);
-        exit;
-    }
-    
-    echo json_encode(['base' => $base, 'items' => $items], JSON_PRETTY_PRINT);
-    exit;
+    } catch (Exception $e) { echo json_encode(['error' => $e->getMessage()]); exit; }
+    echo json_encode(['items' => $items]); exit;
 }
 
-// 2. DESCARGAR
+// DESCARGAR
 if ($action === 'download') {
-    $token = $_GET['token'] ?? '';
-    $token = preg_replace('/[^a-z0-9_-]/i', '', $token);
-    $tmpdir = sys_get_temp_dir();
-    $file = $tmpdir . DIRECTORY_SEPARATOR . "unified_{$token}.txt";
-    
-    if (!$token || !file_exists($file)) { 
-        http_response_code(404); echo "Archivo expirado."; exit; 
-    }
-    
-    header('Content-Description: File Transfer');
+    $token = preg_replace('/[^a-z0-9_-]/i', '', $_GET['token'] ?? '');
+    $file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "unified_{$token}.txt";
+    if (!$token || !file_exists($file)) die("Archivo expirado.");
     header('Content-Type: text/plain');
     header('Content-Disposition: attachment; filename="proyecto_unificado.txt"');
     header('Content-Length: ' . filesize($file));
-    readfile($file);
-    exit;
+    readfile($file); exit;
 }
 
-// 3. CANCELAR
+// CANCELAR
 if ($action === 'cancel') {
-    $token = $_GET['token'] ?? '';
-    $token = preg_replace('/[^a-z0-9_-]/i', '', $token);
-    if ($token) {
-        file_put_contents(sys_get_temp_dir() . DIRECTORY_SEPARATOR . "cancel_{$token}.flag", "1");
-    }
+    $token = preg_replace('/[^a-z0-9_-]/i', '', $_GET['token'] ?? '');
+    if ($token) file_put_contents(sys_get_temp_dir() . "/cancel_{$token}.flag", "1");
     exit;
 }
 
-// 4. PROCESAR (SSE)
+// PROCESAR (SSE)
 if ($action === 'process') {
-    $base = rtrim($_GET['base'] ?? __DIR__, '/\\');
-    
     header('Content-Type: text/event-stream');
     header('Cache-Control: no-cache');
-    header('X-Accel-Buffering: no'); 
+    header('Connection: keep-alive');
+    header('X-Accel-Buffering: no');
     
-    if (!is_dir($base)) {
-        sse_emit('error', "Base no válida"); sse_emit('done', ['status'=>'error']); exit;
-    }
-
-    // LISTA DE RUTAS SELECCIONADAS (Array de strings con rutas relativas)
-    $selectedPaths = $_GET['paths'] ?? [];
-    if (!is_array($selectedPaths)) $selectedPaths = [];
-
-    $ex_ext = array_filter(array_map('trim', explode(',', $_GET['exclude_ext'] ?? '')));
-    $ex_folders = array_filter(array_map('trim', explode(',', $_GET['exclude_folders'] ?? '')));
-    $ex_files = array_filter(array_map('trim', explode(',', $_GET['exclude_files'] ?? '')));
-    $token = preg_replace('/[^a-z0-9_-]/i', '', ($_GET['token'] ?? bin2hex(random_bytes(6))));
-
-    while (ob_get_level() > 0) ob_end_flush(); flush();
-
-    $tmpdir = sys_get_temp_dir();
-    $outFile = $tmpdir . DIRECTORY_SEPARATOR . "unified_{$token}.txt";
-    $cancelFlag = $tmpdir . DIRECTORY_SEPARATOR . "cancel_{$token}.flag";
+    $base = rtrim($_GET['base'] ?? __DIR__, '/\\');
+    $selPaths = $_GET['paths'] ?? [];
+    $ex_ext = explode(',', $_GET['exclude_ext'] ?? '');
+    $ex_folders = explode(',', $_GET['exclude_folders'] ?? '');
+    $token = preg_replace('/[^a-z0-9_-]/i', '', $_GET['token'] ?? bin2hex(random_bytes(6)));
     
+    $tmp = sys_get_temp_dir();
+    $outFile = $tmp . "/unified_{$token}.txt";
+    $cancelFlag = $tmp . "/cancel_{$token}.flag";
     if (file_exists($cancelFlag)) @unlink($cancelFlag);
 
-    sse_emit('started', ['token' => $token]);
-
-    // --- FASE 1: INDEXADO ---
-    // Recorremos TODO y filtramos manualmente según la selección del usuario
-    $dirIter = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS | FilesystemIterator::FOLLOW_SYMLINKS),
-        RecursiveIteratorIterator::SELF_FIRST
-    );
-
-    $filesToProcess = [];
-
-    foreach ($dirIter as $file) {
-        if (file_exists($cancelFlag)) { sse_emit('cancelled', []); exit; }
-
-        $pathAbs = $file->getPathname();
-        // Ruta relativa normalizada (siempre con /)
-        $rel = ltrim(substr($pathAbs, strlen($base)), '/\\');
-        $relUnified = str_replace('\\', '/', $rel);
-        
-        // 1. FILTRO DE SELECCIÓN (CORE UPDATE)
-        // Si el usuario seleccionó algo, verificamos si este archivo está DENTRO de algo seleccionado.
-        // Si $selectedPaths está vacío, procesamos todo (comportamiento por defecto).
-        if (!empty($selectedPaths)) {
-            $isIncluded = false;
-            foreach ($selectedPaths as $selPath) {
-                // Normalizar selección
-                $selPathUnified = str_replace('\\', '/', $selPath);
-                
-                // Lógica:
-                // 1. Coincidencia exacta (es el archivo seleccionado)
-                // 2. Es un hijo de una carpeta seleccionada (comienza con "carpeta/")
-                if ($relUnified === $selPathUnified || strpos($relUnified, $selPathUnified . '/') === 0) {
-                    $isIncluded = true;
-                    break;
-                }
-            }
-            if (!$isIncluded) continue; // No fue seleccionado ni él ni su padre
-        }
-
-        // 2. Exclusiones Globales
-        $pathParts = explode('/', $relUnified);
-        foreach ($pathParts as $part) {
-            if (in_array($part, $ex_folders)) continue 2; // Saltar al siguiente archivo del iterador
-        }
-
-        if ($file->isDir()) continue; // Solo procesamos archivos finales
-
-        if (in_array($file->getFilename(), $ex_files)) continue;
-        $ext = strtolower($file->getExtension());
-        if ($ext !== '' && in_array($ext, $ex_ext)) continue;
-
-        $filesToProcess[] = $rel;
+    function sse($evt, $data) { 
+        echo "event: $evt\n";
+        echo "data: " . json_encode($data) . "\n\n";
+        echo str_repeat(' ', 4096); echo "\n"; // Padding Anti-Freeze
+        @ob_flush(); @flush(); 
     }
 
-    $total = count($filesToProcess);
-    sse_emit('indexed', ['count' => $total]);
+    sse('started', ['token' => $token]);
 
-    if ($total === 0) {
-        sse_emit('done', ['status' => 'empty', 'token' => $token]); exit;
-    }
-
-    // --- FASE 2: ESCRITURA ---
-    $handleOut = fopen($outFile, 'w');
-    fwrite($handleOut, "# UNIFICADOR ULTRA PRO v2.5\n# FECHA: " . date('Y-m-d H:i:s') . "\n# ARCHIVOS: {$total}\n\n");
+    // 1. Indexado
+    $files = [];
+    $iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, FilesystemIterator::SKIP_DOTS));
     
-    // Índice
-    foreach ($filesToProcess as $f) fwrite($handleOut, "# {$f}\n");
-    fwrite($handleOut, "\n" . str_repeat("-", 50) . "\n\n");
-
-    $processed = 0;
-    foreach ($filesToProcess as $relPath) {
-        if (file_exists($cancelFlag)) { fclose($handleOut); sse_emit('cancelled', []); exit; }
-
-        $absPath = $base . DIRECTORY_SEPARATOR . $relPath;
-        $processed++;
-        $pct = round(($processed / $total) * 100);
-
-        sse_emit('filestart', ['file' => $relPath, 'index' => $processed, 'total' => $total]);
-
-        fwrite($handleOut, "====== START: {$relPath} ======\n");
-        try {
-            $fobj = new SplFileObject($absPath, 'r');
-            while (!$fobj->eof()) fwrite($handleOut, $fobj->fgets());
-            $fobj = null; 
-            fwrite($handleOut, "\n====== END: {$relPath} ======\n\n");
-            if ($processed % 10 === 0) fflush($handleOut);
-        } catch (Exception $e) {
-            fwrite($handleOut, "\n[ERROR LEYENDO ARCHIVO]\n\n");
+    foreach ($iterator as $file) {
+        if (file_exists($cancelFlag)) { sse('cancelled', []); exit; }
+        $rel = str_replace('\\', '/', ltrim(substr($file->getPathname(), strlen($base)), '/\\'));
+        
+        // Filtros
+        if (!empty($selPaths)) {
+            $included = false;
+            foreach ($selPaths as $sel) {
+                $sel = str_replace('\\', '/', $sel);
+                if ($rel === $sel || strpos($rel, $sel.'/') === 0) { $included = true; break; }
+            }
+            if (!$included) continue;
         }
+        $parts = explode('/', $rel);
+        foreach ($parts as $p) if (in_array($p, $ex_folders)) continue 2;
+        if (in_array(strtolower($file->getExtension()), $ex_ext)) continue;
 
-        sse_emit('filedone', ['pct' => $pct]);
-        if ($total < 500) usleep(2000); 
+        $files[] = $rel;
     }
 
-    fclose($handleOut);
-    $downloadUrl = '?action=download&token=' . $token;
-    sse_emit('done', ['status' => 'ok', 'download' => $downloadUrl]);
+    $total = count($files);
+    sse('indexed', ['count' => $total]);
+
+    if ($total > 0) {
+        $fh = fopen($outFile, 'w');
+        
+        // --- NUEVO: Escribir Estructura del Proyecto (Árbol) ---
+        fwrite($fh, "# REPORTE DE UNIFICACIÓN\n");
+        fwrite($fh, "# FECHA: " . date('Y-m-d H:i:s') . "\n");
+        fwrite($fh, "# ARCHIVOS TOTALES: $total\n\n");
+        
+        fwrite($fh, str_repeat("=", 50) . "\n");
+        fwrite($fh, " ESTRUCTURA DEL PROYECTO \n");
+        fwrite($fh, str_repeat("=", 50) . "\n");
+        
+        // Generar árbol y escribirlo
+        $asciiTree = generateAsciiTree($files);
+        fwrite($fh, $asciiTree);
+        fwrite($fh, "\n" . str_repeat("=", 50) . "\n\n");
+        // -----------------------------------------------------
+
+        $i = 0;
+        foreach ($files as $f) {
+            if (file_exists($cancelFlag)) { fclose($fh); sse('cancelled', []); exit; }
+            $i++;
+            
+            sse('progress', ['file' => $f, 'pct' => round(($i/$total)*100)]);
+            
+            fwrite($fh, "====== INICIO ARCHIVO: $f ======\n");
+            try {
+                $c = file_get_contents($base . DIRECTORY_SEPARATOR . $f);
+                fwrite($fh, $c . "\n");
+            } catch(Exception $e) { fwrite($fh, "[ERROR LECTURA]\n"); }
+            fwrite($fh, "====== FIN ARCHIVO: $f ======\n\n");
+            
+            usleep(5000); // Pausa minúscula para UI fluida
+        }
+        fclose($fh);
+        sse('done', ['url' => "?action=download&token=$token"]);
+    } else {
+        sse('done', ['error' => 'Sin archivos para procesar.']);
+    }
     exit;
 }
-
-function formatBytes($bytes, $precision = 2) { 
-    if ($bytes == 0) return '0 B';
-    $units = ['B', 'KB', 'MB', 'GB', 'TB']; 
-    $pow = floor(($bytes ? log($bytes) : 0) / log(1024)); 
-    $pow = min($pow, count($units) - 1); 
-    return round($bytes / pow(1024, $pow), $precision) . ' ' . $units[$pow]; 
-}
-
-function sse_emit($event, $data) {
-    echo "event: {$event}\n";
-    echo "data: " . json_encode($data) . "\n\n";
-    while (ob_get_level() > 0) ob_end_flush();
-    flush();
-}
-
-# -------------------------
-# INTERFAZ GRÁFICA
-# -------------------------
-$baseDefault = str_replace('\\', '/', __DIR__);
 ?>
 <!DOCTYPE html>
-<html lang="es">
+<html lang="es" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Unificador v2.5 - Tree View</title>
-    <style>
-        :root { --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9; --accent: #238636; --blue: #58a6ff; }
-        body { margin: 0; font-family: sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
-        * { box-sizing: border-box; }
-        .app { display: grid; grid-template-columns: 380px 1fr; gap: 1rem; padding: 1rem; height: 100%; max-width: 1800px; margin: 0 auto; width:100%; }
-        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; display: flex; flex-direction: column; overflow: hidden; }
-        .panel-head { padding: 10px; background: rgba(255,255,255,0.03); border-bottom: 1px solid var(--border); font-weight: bold; }
-        .panel-body { padding: 10px; overflow-y: auto; flex: 1; }
-        input[type="text"] { width: 100%; background: #0d1117; border: 1px solid var(--border); color: white; padding: 6px; border-radius: 4px; margin-bottom: 10px; }
-        .btn { cursor: pointer; border: 0; padding: 6px 12px; border-radius: 4px; background: #21262d; color: white; border: 1px solid var(--border); }
-        .btn:hover { background: #30363d; } .btn-primary { background: var(--accent); border-color: transparent; }
-        .btn-danger { color: #da3633; }
-        
-        /* Tree View Styles */
-        .tree-container { border: 1px solid var(--border); background: #0d1117; height: 350px; overflow: auto; padding: 5px; }
-        .tree-ul { list-style: none; padding-left: 18px; margin: 0; display: none; }
-        .tree-ul.open { display: block; }
-        .tree-root-ul { padding-left: 0; display: block; }
-        .tree-li { margin: 2px 0; }
-        .tree-item { display: flex; align-items: center; padding: 2px 4px; border-radius: 3px; cursor: default; }
-        .tree-item:hover { background: rgba(255,255,255,0.05); }
-        
-        .tree-toggle { width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 10px; color: var(--text); opacity: 0.7; margin-right: 2px; }
-        .tree-toggle:hover { opacity: 1; color: white; }
-        .tree-icon { margin: 0 5px; width: 16px; text-align: center; }
-        .type-dir { color: var(--blue); }
-        .type-file { color: #8b949e; }
-        .tree-name { font-size: 13px; white-space: nowrap; }
+    <title>Unificador Ultra PRO v4.5</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Fonts & Icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <link rel="stylesheet" type='text/css' href="https://cdn.jsdelivr.net/gh/devicons/devicon@latest/devicon.min.css" />
 
-        /* Logs */
-        .terminal { font-family: monospace; font-size: 12px; color: #8b949e; margin-top: 10px; }
-        .log-ok { color: var(--accent); } .log-err { color: #da3633; }
-        .progress { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; margin: 10px 0; }
-        .bar { height: 100%; background: var(--blue); width: 0%; transition: width 0.1s; }
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'], mono: ['JetBrains Mono', 'monospace'] },
+                    colors: {
+                        dark: { 900: '#0d1117', 800: '#161b22', 700: '#21262d', 600: '#30363d' }, 
+                        light: { 50: '#f9fafb', 100: '#f3f4f6', 200: '#e5e7eb', 300: '#d1d5db' },
+                        accent: { 500: '#2563eb', 600: '#1d4ed8' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { transition: background-color 0.3s ease, color 0.3s ease; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        .dark ::-webkit-scrollbar-track { background: #0d1117; }
+        .dark ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 4px; }
+        ::-webkit-scrollbar-track { background: #f3f4f6; }
+        ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 4px; }
+        .tree-enter { animation: slideIn 0.2s ease-out; }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(-5px); } to { opacity: 1; transform: translateX(0); } }
+        .checkbox-wrapper input:checked { background-color: #2563eb; border-color: #2563eb; background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e%3c/svg%3e"); }
     </style>
 </head>
-<body>
+<body class="bg-light-50 text-slate-700 dark:bg-dark-900 dark:text-slate-300 font-sans h-screen flex flex-col overflow-hidden">
 
-<div class="app">
-    <!-- Config Panel -->
-    <div class="panel">
-        <div class="panel-head">Configuración</div>
-        <div class="panel-body">
-            <label>Ruta Base:</label>
-            <div style="display:flex; gap:5px; margin-bottom:10px;">
-                <input type="text" id="basePath" value="<?php echo htmlspecialchars($baseDefault); ?>">
-                <button class="btn" onclick="initTree()">Cargar</button>
+    <!-- HEADER -->
+    <header class="h-16 bg-white dark:bg-dark-800 border-b border-light-200 dark:border-dark-600 flex items-center justify-between px-6 shadow-sm z-20 transition-colors">
+        <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center shadow-md">
+                <i class="ph ph-tree-structure text-white text-xl"></i>
             </div>
-
-            <label>Selección (Marca carpetas para incluir todo):</label>
-            <div class="tree-container" id="treeRoot">
-                <div style="padding:10px; color:#8b949e; text-align:center">Carga una ruta...</div>
-            </div>
-            
-            <div style="margin-top:10px;">
-                <button class="btn" style="font-size:11px" onclick="checkAll(true)">Marcar Todo</button>
-                <button class="btn" style="font-size:11px" onclick="checkAll(false)">Desmarcar</button>
-            </div>
-
-            <hr style="border:0; border-top:1px solid var(--border); margin:15px 0;">
-            
-            <label>Excluir Carpetas (Global):</label>
-            <input type="text" id="exFolders" value="<?php echo implode(',', $DEFAULT_EXCLUDE_FOLDERS); ?>">
-            
-            <label>Excluir Extensiones:</label>
-            <input type="text" id="exExt" value="<?php echo implode(',', $DEFAULT_EXCLUDE_EXT); ?>">
-
-            <button class="btn btn-primary" id="btnGo" style="width:100%; margin-top:10px; padding:10px;">🚀 UNIFICAR</button>
-            <div style="display:flex; gap:5px; margin-top:5px;">
-                <button class="btn btn-danger" id="btnCancel" style="flex:1;" disabled>Cancelar</button>
-                <a id="btnDown" class="btn" style="flex:1; text-align:center; display:none; background:var(--accent); text-decoration:none;">⬇ Descargar</a>
+            <div>
+                <h1 class="font-bold text-slate-800 dark:text-white leading-tight">Unificador <span class="text-accent-500">v4.5</span></h1>
+                <p class="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">Structure Aware</p>
             </div>
         </div>
-    </div>
+        <button onclick="toggleTheme()" class="w-10 h-10 rounded-full bg-light-100 dark:bg-dark-700 hover:bg-light-200 dark:hover:bg-dark-600 flex items-center justify-center transition-all text-slate-600 dark:text-yellow-400">
+            <i id="themeIcon" class="ph-fill ph-sun text-xl"></i>
+        </button>
+    </header>
 
-    <!-- Output Panel -->
-    <div class="panel">
-        <div class="panel-head">Estado</div>
-        <div class="panel-body">
-            <div style="display:flex; justify-content:space-between; font-size:13px;">
-                <span id="lblStatus">Esperando...</span>
-                <span id="lblPct">0%</span>
-            </div>
-            <div class="progress"><div class="bar" id="progressBar"></div></div>
-            <div class="terminal" id="console"></div>
-        </div>
-    </div>
-</div>
-
-<script>
-const el = i => document.getElementById(i);
-let currentBase = '';
-
-// --- LOGIC TREE VIEW ---
-
-// Carga inicial
-function initTree() {
-    currentBase = el('basePath').value.trim();
-    if(!currentBase) return alert('Define una ruta');
-    el('treeRoot').innerHTML = '<div style="padding:10px">Cargando raíz...</div>';
-    
-    // Crear UL raíz
-    const rootUl = document.createElement('ul');
-    rootUl.className = 'tree-ul tree-root-ul open';
-    el('treeRoot').innerHTML = '';
-    el('treeRoot').appendChild(rootUl);
-
-    loadDir(currentBase, '', rootUl);
-}
-
-// Cargar directorio (API)
-function loadDir(base, relPath, containerUl) {
-    const url = `?action=list&base=${encodeURIComponent(base)}&dir=${encodeURIComponent(relPath)}`;
-    
-    fetch(url).then(r => r.json()).then(data => {
-        if(data.error) {
-            containerUl.innerHTML = `<div style="color:red; padding:5px;">Error: ${data.error}</div>`;
-            return;
-        }
+    <main class="flex-1 flex overflow-hidden">
         
-        containerUl.innerHTML = ''; // Limpiar "Cargando..."
-        
-        if(data.items.length === 0) {
-            containerUl.innerHTML = '<li style="padding:2px 10px; color:#666; font-size:11px;">(Vacío)</li>';
-            return;
-        }
-
-        data.items.forEach(item => {
-            const li = document.createElement('li');
-            li.className = 'tree-li';
-            
-            const isDir = item.type === 'dir';
-            const icon = isDir ? '📁' : '📄';
-            const cssClass = isDir ? 'type-dir' : 'type-file';
-            
-            // HTML Estructura
-            let html = `
-                <div class="tree-item">
-                    <span class="tree-toggle">${isDir ? '▶' : ''}</span>
-                    <input type="checkbox" class="tree-chk" value="${item.path}">
-                    <span class="tree-icon ${cssClass}">${icon}</span>
-                    <span class="tree-name">${item.name}</span>
+        <!-- SIDEBAR -->
+        <aside class="w-96 bg-white dark:bg-dark-800 border-r border-light-200 dark:border-dark-600 flex flex-col shadow-xl z-10 transition-colors">
+            <div class="p-5 border-b border-light-200 dark:border-dark-600">
+                <label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 block">Directorio Raíz</label>
+                <div class="relative group">
+                    <input type="text" id="basePath" value="<?php echo htmlspecialchars(str_replace('\\', '/', __DIR__)); ?>" 
+                           class="w-full pl-3 pr-10 bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-sm rounded-md py-2 focus:ring-2 focus:ring-accent-500 outline-none transition-all text-slate-700 dark:text-slate-200">
+                    <button onclick="initTree()" class="absolute right-2 top-1.5 p-1 text-slate-400 hover:text-accent-500" title="Recargar"><i class="ph ph-arrows-clockwise text-lg"></i></button>
                 </div>
-            `;
+            </div>
+
+            <div class="flex-1 overflow-y-auto p-2 bg-light-50/50 dark:bg-dark-800" id="treeContainer">
+                <div id="treeRoot" class="text-sm"></div>
+            </div>
+
+            <div class="p-4 border-t border-light-200 dark:border-dark-600 bg-white dark:bg-dark-800 space-y-3">
+                <div class="flex justify-between text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
+                    <button onclick="checkAll(true)" class="hover:text-accent-500">Marcar todo</button>
+                    <button onclick="checkAll(false)" class="hover:text-red-400">Limpiar</button>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <input type="text" id="exFolders" value="<?php echo implode(',', $DEFAULT_EXCLUDE_FOLDERS); ?>" class="bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-xs rounded px-2 py-1.5 outline-none text-slate-600 dark:text-slate-400 placeholder-slate-400" placeholder="Excluir carpetas">
+                    <input type="text" id="exExt" value="<?php echo implode(',', $DEFAULT_EXCLUDE_EXT); ?>" class="bg-light-50 dark:bg-dark-900 border border-light-300 dark:border-dark-600 text-xs rounded px-2 py-1.5 outline-none text-slate-600 dark:text-slate-400 placeholder-slate-400" placeholder="Excluir ext">
+                </div>
+                <button id="btnGo" class="w-full bg-accent-600 hover:bg-accent-500 text-white font-semibold py-3 rounded-md shadow-lg shadow-accent-500/30 transition-all active:scale-[0.98] flex items-center justify-center gap-2 group">
+                    <i class="ph ph-lightning text-xl group-hover:text-yellow-300"></i><span>Unificar Archivos</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- MAIN CONTENT -->
+        <section class="flex-1 flex flex-col bg-light-100 dark:bg-dark-900 relative transition-colors">
             
-            // Si es dir, preparamos contenedor hijos
-            if(isDir) {
-                html += `<ul class="tree-ul" id="ul-${btoa(item.path)}"></ul>`;
-            }
-            
-            li.innerHTML = html;
-            containerUl.appendChild(li);
+            <!-- PROGRESS BAR -->
+            <div id="progressContainer" class="hidden w-full bg-light-200 dark:bg-dark-700 h-1.5 relative z-30">
+                <div id="progressBar" class="h-full bg-accent-500 w-0 transition-all duration-150 ease-out shadow-[0_0_15px_#2563eb]"></div>
+            </div>
 
-            // Eventos
-            if(isDir) {
-                const toggleBtn = li.querySelector('.tree-toggle');
-                const childUl = li.querySelector('.tree-ul');
-                
-                // Click en flecha para expandir
-                toggleBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    const isOpen = childUl.classList.contains('open');
-                    
-                    if(isOpen) {
-                        childUl.classList.remove('open');
-                        toggleBtn.innerText = '▶';
-                    } else {
-                        childUl.classList.add('open');
-                        toggleBtn.innerText = '▼';
-                        // Lazy Load si está vacío
-                        if(childUl.children.length === 0) {
-                            childUl.innerHTML = '<li style="padding-left:20px; font-size:11px;">Cargando...</li>';
-                            loadDir(base, item.path, childUl);
-                        }
-                    }
-                });
-                
-                // UX: Si marcas una carpeta padre, "visualmente" es como si marcaras todo lo de adentro
-                // El backend maneja la lógica: si recibo "carpeta/", incluyo todo lo que empiece por "carpeta/"
-                const chk = li.querySelector('.tree-chk');
-                chk.addEventListener('change', () => {
-                   // Opcional: Podríamos marcar/desmarcar visualmente los hijos cargados
-                   // pero para simplificar y rendimiento, dejamos que la lógica de backend mande.
-                   const childChecks = childUl.querySelectorAll('.tree-chk');
-                   childChecks.forEach(c => c.checked = chk.checked);
-                });
-            }
-        });
-    }).catch(e => {
-        containerUl.innerHTML = 'Error de conexión';
-    });
-}
+            <!-- EMPTY STATE -->
+            <div id="emptyState" class="absolute inset-0 flex flex-col items-center justify-center opacity-40 pointer-events-none transition-opacity">
+                <i class="ph ph-files text-6xl mb-4 text-slate-400"></i>
+                <h3 class="text-xl font-medium text-slate-600 dark:text-slate-400">Selecciona archivos</h3>
+            </div>
 
-function checkAll(state) {
-    document.querySelectorAll('.tree-chk').forEach(c => c.checked = state);
-}
+            <!-- CONSOLE -->
+            <div id="consoleContainer" class="flex-1 p-8 overflow-y-auto hidden">
+                <div class="max-w-4xl mx-auto w-full bg-white dark:bg-[#0f1115] rounded-xl border border-light-300 dark:border-dark-600 shadow-xl overflow-hidden flex flex-col h-full">
+                    <div class="bg-light-50 dark:bg-dark-800 px-4 py-2 border-b border-light-200 dark:border-dark-600 flex justify-between items-center">
+                        <span class="text-xs font-mono text-slate-400">System Log</span>
+                        <button id="btnCancel" class="hidden text-[10px] uppercase font-bold text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 px-2 py-1 rounded">Cancelar</button>
+                    </div>
+                    <div id="logs" class="flex-1 p-4 font-mono text-xs space-y-1 overflow-y-auto bg-white dark:bg-[#0f1115] text-slate-600 dark:text-slate-300"></div>
+                </div>
+            </div>
 
-// --- LOGIC PROCESS ---
-let evtSource = null;
+            <!-- SUCCESS PANEL -->
+            <div id="successPanel" class="hidden absolute bottom-10 right-10 z-40 animate-[slideIn_0.4s_ease-out]">
+                <div class="bg-white dark:bg-dark-700 border border-green-200 dark:border-green-900 p-5 rounded-lg shadow-2xl w-80 flex flex-col gap-3">
+                    <div class="flex items-center gap-3">
+                        <i class="ph-fill ph-check-circle text-2xl text-green-500"></i>
+                        <div>
+                            <h4 class="font-bold text-slate-800 dark:text-white text-sm">¡Completado!</h4>
+                            <p class="text-xs text-slate-500">Archivo generado con estructura.</p>
+                        </div>
+                    </div>
+                    <a id="btnDownload" href="#" class="w-full text-center bg-green-600 hover:bg-green-500 text-white text-sm font-medium py-2 rounded-md transition-colors shadow-md">Descargar .txt</a>
+                </div>
+            </div>
+        </section>
+    </main>
 
-function log(msg, type='') {
-    const d = document.createElement('div');
-    d.className = type === 'err' ? 'log-err' : (type==='ok'?'log-ok':'');
-    d.textContent = `> ${msg}`;
-    el('console').appendChild(d);
-    el('console').scrollTop = el('console').scrollHeight;
-}
+    <script>
+        const el = id => document.getElementById(id);
+        const state = { base: '', source: null };
 
-el('btnGo').onclick = () => {
-    // Recolectar rutas seleccionadas
-    const checks = document.querySelectorAll('.tree-chk:checked');
-    const paths = Array.from(checks).map(c => c.value);
-    
-    el('btnGo').disabled = true;
-    el('btnCancel').disabled = false;
-    el('btnDown').style.display = 'none';
-    el('console').innerHTML = '';
-    el('progressBar').style.width = '0%';
-    
-    // Crear URL con params
-    const u = new URLSearchParams();
-    u.append('action', 'process');
-    u.append('base', currentBase);
-    u.append('exclude_folders', el('exFolders').value);
-    u.append('exclude_ext', el('exExt').value);
-    
-    // Enviar array de paths
-    paths.forEach(p => u.append('paths[]', p));
-
-    log(`Iniciando... ${paths.length ? paths.length + ' rutas seleccionadas.' : 'Todo seleccionado.'}`);
-
-    if(evtSource) evtSource.close();
-    evtSource = new EventSource('?' + u.toString());
-
-    evtSource.addEventListener('started', e => log('Token generado. Indexando...'));
-    evtSource.addEventListener('indexed', e => {
-        const d = JSON.parse(e.data);
-        log(`Encontrados ${d.count} archivos.`);
-        if(d.count == 0) endProcess();
-    });
-    evtSource.addEventListener('filestart', e => {
-        const d = JSON.parse(e.data);
-        el('lblStatus').textContent = `Procesando: ${d.file}`;
-    });
-    evtSource.addEventListener('filedone', e => {
-        const d = JSON.parse(e.data);
-        el('progressBar').style.width = d.pct + '%';
-        el('lblPct').textContent = d.pct + '%';
-    });
-    evtSource.addEventListener('done', e => {
-        const d = JSON.parse(e.data);
-        endProcess();
-        if(d.status === 'ok') {
-            log('COMPLETADO', 'ok');
-            el('btnDown').href = d.download;
-            el('btnDown').style.display = 'block';
-        } else {
-            log('Error o vacío', 'err');
+        // THEME
+        function initTheme() {
+            if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+                document.documentElement.classList.add('dark'); updateThemeIcon(true);
+            } else { document.documentElement.classList.remove('dark'); updateThemeIcon(false); }
         }
-    });
-    evtSource.addEventListener('cancelled', () => { log('Cancelado por usuario', 'err'); endProcess(); });
-    evtSource.onerror = () => { endProcess(); };
-};
+        function toggleTheme() {
+            const isDark = document.documentElement.classList.toggle('dark');
+            localStorage.theme = isDark ? 'dark' : 'light';
+            updateThemeIcon(isDark);
+        }
+        function updateThemeIcon(isDark) {
+            const icon = el('themeIcon');
+            icon.className = isDark ? 'ph-fill ph-sun text-xl text-yellow-400' : 'ph-fill ph-moon text-xl text-slate-600';
+        }
+        initTheme();
 
-el('btnCancel').onclick = () => {
-    fetch('?action=cancel&token=1'); // Token genérico para el ejemplo visual, el real lo maneja la sesión si fuera compleja
-    if(evtSource) evtSource.close();
-    log('Cancelando...', 'err');
-    endProcess();
-};
+        // ICONS
+        function getIconClass(ext, name) {
+            const map = {
+                'php': 'devicon-php-plain colored', 'js': 'devicon-javascript-plain colored', 'html': 'devicon-html5-plain colored',
+                'css': 'devicon-css3-plain colored', 'py': 'devicon-python-plain colored', 'java': 'devicon-java-plain colored',
+                'json': 'devicon-json-plain colored', 'sql': 'devicon-mysql-plain colored', 'ts': 'devicon-typescript-plain colored'
+            };
+            if(name === 'package.json') return 'devicon-npm-original-wordmark colored';
+            return map[ext] || 'ph ph-file-text text-slate-400';
+        }
 
-function endProcess() {
-    el('btnGo').disabled = false;
-    el('btnCancel').disabled = true;
-    if(evtSource) evtSource.close();
-}
+        // TREE VIEW LOGIC
+        function initTree() {
+            state.base = el('basePath').value.trim();
+            if(!state.base) return alert('Define una ruta');
+            const root = el('treeRoot');
+            root.innerHTML = `<div class="p-4 text-center text-slate-400"><i class="ph ph-spinner animate-spin text-2xl"></i></div>`;
+            loadDir(state.base, '', root, true);
+        }
 
-// Auto init si hay valor
-if(el('basePath').value) initTree();
-</script>
+        async function loadDir(base, rel, container, isRoot) {
+            try {
+                const res = await fetch(`?action=list&base=${encodeURIComponent(base)}&dir=${encodeURIComponent(rel)}`);
+                const data = await res.json();
+                container.innerHTML = '';
+                if(data.error) throw new Error(data.error);
+                if(!data.items || !data.items.length) { container.innerHTML = `<div class="pl-6 py-1 text-slate-400 text-[10px]">Vacío</div>`; return; }
+
+                const ul = document.createElement('ul');
+                ul.className = isRoot ? '' : 'pl-4 border-l border-light-200 dark:border-dark-600 ml-2 mt-1';
+                
+                data.items.forEach(item => {
+                    const li = document.createElement('li');
+                    const uid = btoa(item.path).replace(/=/g, '');
+                    const isDir = item.type === 'dir';
+                    const icon = isDir ? '<i class="ph-fill ph-folder text-blue-400 text-lg"></i>' : `<i class="${getIconClass(item.ext, item.name)} text-lg"></i>`;
+
+                    li.innerHTML = `
+                        <div class="group flex items-center gap-2 py-1 px-2 rounded hover:bg-light-200 dark:hover:bg-dark-700 cursor-pointer select-none" data-path="${item.path}">
+                            <span class="w-4 h-4 flex items-center justify-center text-slate-400 toggle-btn text-[10px]">${isDir ? '<i class="ph-bold ph-caret-right"></i>' : ''}</span>
+                            <div class="checkbox-wrapper flex"><input type="checkbox" class="appearance-none w-4 h-4 border border-slate-300 dark:border-slate-600 rounded bg-white dark:bg-dark-900 cursor-pointer" value="${item.path}"></div>
+                            <span class="flex w-5 justify-center">${icon}</span>
+                            <span class="text-slate-600 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-white truncate text-[13px]">${item.name}</span>
+                        </div>
+                        ${isDir ? `<div id="sub-${uid}" class="hidden"></div>` : ''}
+                    `;
+                    ul.appendChild(li);
+
+                    const row = li.querySelector('div'), chk = li.querySelector('input'), toggle = li.querySelector('.toggle-btn');
+                    if(isDir) {
+                        const sub = li.querySelector(`#sub-${uid}`);
+                        const doToggle = (e) => {
+                            e.stopPropagation();
+                            if(sub.classList.toggle('hidden')) toggle.innerHTML = '<i class="ph-bold ph-caret-right"></i>';
+                            else { toggle.innerHTML = '<i class="ph-bold ph-caret-down"></i>'; if(!sub.hasChildNodes()) loadDir(base, item.path, sub); }
+                        };
+                        toggle.addEventListener('click', doToggle);
+                        row.addEventListener('dblclick', doToggle);
+                    }
+                    chk.addEventListener('click', e => e.stopPropagation());
+                    chk.addEventListener('change', () => { if(isDir) li.querySelector(`#sub-${uid}`)?.querySelectorAll('input').forEach(c => c.checked = chk.checked); });
+                    row.addEventListener('click', e => { if(e.target!==toggle) { chk.checked=!chk.checked; chk.dispatchEvent(new Event('change')); }});
+                });
+                container.appendChild(ul);
+            } catch(e) { container.innerHTML = `<div class="text-red-500 text-xs p-2">${e.message}</div>`; }
+        }
+
+        // APP LOGIC
+        function log(msg, type='info') {
+            const d = document.createElement('div');
+            const clr = { info: 'text-slate-500 dark:text-slate-400', success: 'text-green-500 font-bold', error: 'text-red-500 font-bold' };
+            d.className = `${clr[type] || clr.info} text-xs py-0.5 border-l-2 border-transparent pl-2`;
+            d.innerText = `> ${msg}`;
+            el('logs').appendChild(d);
+            el('logs').parentElement.scrollTop = el('logs').parentElement.scrollHeight;
+        }
+
+        el('btnGo').onclick = () => {
+            const checks = document.querySelectorAll('input[type="checkbox"]:checked');
+            const paths = Array.from(checks).map(c => c.value);
+
+            el('emptyState').classList.add('hidden');
+            el('consoleContainer').classList.remove('hidden');
+            el('successPanel').classList.add('hidden');
+            el('logs').innerHTML = '';
+            el('progressContainer').classList.remove('hidden');
+            el('progressBar').style.width = '0%';
+            el('btnCancel').classList.remove('hidden');
+            el('btnGo').disabled = true;
+            el('btnGo').classList.add('opacity-50');
+
+            const params = new URLSearchParams({ 
+                action: 'process', base: state.base, 
+                exclude_folders: el('exFolders').value, exclude_ext: el('exExt').value 
+            });
+            paths.forEach(p => params.append('paths[]', p));
+
+            if(state.source) state.source.close();
+            state.source = new EventSource('?' + params.toString());
+            
+            state.source.addEventListener('started', e => log('Iniciando indexado...', 'info'));
+            state.source.addEventListener('indexed', e => log(`Se encontraron ${JSON.parse(e.data).count} archivos.`, 'info'));
+            
+            state.source.addEventListener('progress', e => {
+                const d = JSON.parse(e.data);
+                requestAnimationFrame(() => el('progressBar').style.width = d.pct + '%');
+                if(Math.random() > 0.8) log(d.file); 
+            });
+
+            state.source.addEventListener('done', e => {
+                const d = JSON.parse(e.data);
+                finish();
+                if(d.url) {
+                    el('progressBar').style.width = '100%';
+                    el('btnDownload').href = d.url;
+                    el('successPanel').classList.remove('hidden');
+                    log('GENERACIÓN EXITOSA (Incluye Estructura de Proyecto)', 'success');
+                } else log(d.error, 'error');
+            });
+
+            state.source.onerror = () => { log('Error de conexión', 'error'); finish(); };
+        };
+
+        el('btnCancel').onclick = () => { fetch('?action=cancel&token=1'); if(state.source) state.source.close(); log('Cancelado'); };
+
+        function finish() {
+            if(state.source) state.source.close();
+            el('btnGo').disabled = false;
+            el('btnGo').classList.remove('opacity-50');
+            setTimeout(() => el('progressContainer').classList.add('hidden'), 1000);
+        }
+
+        function checkAll(v) { document.querySelectorAll('input[type="checkbox"]').forEach(c => c.checked = v); }
+        if(el('basePath').value) initTree();
+    </script>
 </body>
 </html>
